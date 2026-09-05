@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 import ccxt
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import pandas_ta as ta
+from plotly.subplots import make_subplot
 
 # 尝试导入 yfinance 用于拉取美股和大宗商品行情
 try:
