@@ -6,9 +6,16 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas_ta as ta
 
+# 尝试导入 yfinance 用于拉取美股和大宗商品行情
+try:
+    import yfinance as yf
+    HAS_YFINANCE = True
+except ImportError:
+    HAS_YFINANCE = False
+
 # 页面配置：移动端极简暗黑风格
 st.set_page_config(
-    page_title="OKX/Binance 永续合约终端", 
+    page_title="多资产结构位合约终端", 
     layout="wide", 
     initial_sidebar_state="collapsed"
 )
@@ -49,13 +56,24 @@ capital = st.sidebar.number_input("单笔保证金 (USDT)", value=50.0, step=5.0
 leverage = st.sidebar.slider("杠杆倍数 (Leverage)", min_value=2, max_value=20, value=5, step=1)
 futures_fee_rate = st.sidebar.number_input("合约手续费率 (%)", value=0.05, step=0.01) / 100
 
-# 资产分类字典（精简为：大宗商品/贵金属、加密货币、手动输入）
+# 完整的资产分类列表：贵金属、美股与科技股、数字货币
 asset_categories = {
+    "📈 美股与指数": [
+        "QQQ | 纳斯达克100 ETF",
+        "SPY | 标普500 ETF",
+        "NVDA | 英伟达",
+        "TSLA | 特斯拉",
+        "AAPL | 苹果",
+        "MSFT | 微软",
+        "AMZN | 亚马逊",
+        "GOOGL | 谷歌",
+        "COIN | Coinbase"
+    ],
     "🥇 贵金属与大宗商品": [
-        "XAUT/USDT | Tether Gold (黄金)",
-        "PAXG/USDT | PAX Gold (黄金)",
-        "XAG/USDT | 现货白银",
-        "USOIL/USDT | 美原油 (WTI)"
+        "GOLD | 现货黄金 (GC=F)",
+        "SILVER | 现货白银 (SI=F)",
+        "OIL | 原油/WTI (CL=F)",
+        "XAUT/USDT | Tether Gold"
     ],
     "🪙 数字货币": [
         "BTC/USDT | 比特币",
@@ -78,25 +96,52 @@ selected_category = st.sidebar.selectbox("🏷️ 选择资产分类", list(asse
 selected_item = st.sidebar.selectbox("📌 选择交易标的", asset_categories[selected_category], index=0)
 
 if "手动" in selected_item:
-    user_input = st.sidebar.text_input("输入交易对代码", value="XAUT/USDT").strip().upper()
-    symbol = user_input if "/" in user_input else f"{user_input}/USDT"
+    user_input = st.sidebar.text_input("输入交易对或代码 (如 NVDA 或 BTC/USDT)", value="NVDA").strip().upper()
+    symbol = user_input
 else:
     symbol = selected_item.split(" | ")[0].strip()
 
 timeframe = st.sidebar.selectbox("K线周期", ["5m", "15m", "1h", "4h", "1d"], index=1)
 risk_reward_ratio = st.sidebar.slider("目标最小盈亏比", 1.5, 4.0, 2.0, 0.5)
 
-# ---------------- ⚡ 极速数据加载 (多源容灾 + 内存缓存 15s) ----------------
+# ---------------- ⚡ 极速多源数据加载 ----------------
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_fast_ohlcv(sym, tf):
-    # 构建多别名搜索列表，提升黄金/白银/原油匹配率
+    # 映射特殊大宗商品代码
+    yf_mapping = {
+        "GOLD": "GC=F",
+        "SILVER": "SI=F",
+        "OIL": "CL=F",
+        "USOIL": "CL=F"
+    }
+    
+    ticker_code = yf_mapping.get(sym, sym)
+
+    # 1. 如果是不含 '/' 的美股代码或期货代码，优先试用 Yahoo Finance
+    if HAS_YFINANCE and ("/" not in sym or ticker_code.endswith("=F")):
+        tf_map = {"5m": "5m", "15m": "15m", "1h": "60m", "4h": "60m", "1d": "1d"}
+        yf_interval = tf_map.get(tf, "15m")
+        period_map = {"5m": "5d", "15m": "7d", "1h": "1mo", "4h": "1mo", "1d": "1y"}
+        
+        try:
+            ticker = yf.Ticker(ticker_code)
+            data = ticker.history(period=period_map.get(tf, "7d"), interval=yf_interval)
+            if not data.empty:
+                data = data.reset_index()
+                col_time = 'Datetime' if 'Datetime' in data.columns else 'Date'
+                data[col_time] = pd.to_datetime(data[col_time]).dt.tz_convert('Asia/Shanghai')
+                data = data.rename(columns={col_time: 'timestamp', 'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+                df_res = data[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(80).reset_index(drop=True)
+                return df_res, ticker_code
+        except Exception:
+            pass
+
+    # 2. 数字货币使用 CCXT（OKX / Binance）获取
     search_symbols = [sym]
-    if "XAU" in sym:
-        search_symbols.extend(["XAUT/USDT", "PAXG/USDT", "GOLD/USDT"])
-    elif "XAG" in sym:
-        search_symbols.extend(["SILVER/USDT", "XAG/USDT"])
-    elif "OIL" in sym:
-        search_symbols.extend(["WTI/USDT", "USOIL/USDT"])
+    if "XAU" in sym or "GOLD" in sym:
+        search_symbols.extend(["XAUT/USDT", "PAXG/USDT"])
+    elif "/" not in sym and not sym.endswith("=F"):
+        search_symbols.append(f"{sym}/USDT")
 
     exchanges = [
         ("okx", ccxt.okx({'enableRateLimit': False, 'timeout': 1500})),
@@ -113,12 +158,13 @@ def fetch_fast_ohlcv(sym, tf):
                     return df, s
             except Exception:
                 continue
+
     return pd.DataFrame(), sym
 
 df, real_symbol = fetch_fast_ohlcv(symbol, timeframe)
 
 if not df.empty and len(df) > 25:
-    # 技术指标
+    # 技术指标计算
     df['EMA7'] = ta.ema(df['close'], length=7)
     df['EMA20'] = ta.ema(df['close'], length=20)
     df['EMA50'] = ta.ema(df['close'], length=50)
@@ -133,7 +179,7 @@ if not df.empty and len(df) > 25:
     curr_ema20 = float(df['EMA20'].iloc[-1])
     curr_adx = float(df['ADX'].iloc[-1])
 
-    # 结构位取值（近 15 根 K 线）
+    # 结构位计算（近 15 根 K 线）
     lookback = 15
     recent_low = float(df['low'].iloc[-lookback:-1].min())
     recent_high = float(df['high'].iloc[-lookback:-1].max())
@@ -150,14 +196,14 @@ if not df.empty and len(df) > 25:
         status_text = "无结构/观望"
         action_color = "#848e9c"
         entry_price, sl_price, tp1_price, liq_price = curr_price, curr_price, curr_price, 0.0
-        advice_msg = f"⚠️ 当前处于震荡区间（ADX={curr_adx:.1f} < 20），结构突破风险较高，建议暂时观望。"
+        advice_msg = f"⚠️ 当前处于震荡盘整（ADX={curr_adx:.1f} < 20），结构破位风险较高，建议暂时观望。"
     elif is_bullish:
         direction = "LONG"
         status_text = f"做多 (Long {leverage}x)"
         action_color = "#0ecb81"
         
         entry_price = round(curr_price, 4)
-        sl_price = round(recent_low * 0.997, 4)  # 结构波段低点下方 0.3%
+        sl_price = round(recent_low * 0.997, 4)  # 结构支撑位下方 0.3%
         risk_per_unit = entry_price - sl_price
         tp1_price = round(entry_price + (risk_per_unit * risk_reward_ratio), 4)
         liq_price = round(entry_price * (1 - (1 / leverage) * 0.9), 4)
@@ -169,7 +215,7 @@ if not df.empty and len(df) > 25:
         action_color = "#f6465d"
         
         entry_price = round(curr_price, 4)
-        sl_price = round(recent_high * 1.003, 4)  # 结构波段高点上方 0.3%
+        sl_price = round(recent_high * 1.003, 4)  # 结构阻力位上方 0.3%
         risk_per_unit = sl_price - entry_price
         tp1_price = round(entry_price - (risk_per_unit * risk_reward_ratio), 4)
         liq_price = round(entry_price * (1 + (1 / leverage) * 0.9), 4)
@@ -256,7 +302,7 @@ if not df.empty and len(df) > 25:
         st.rerun()
 
 else:
-    st.warning(f"⚠️ 暂未获取到 {symbol} 的实时行情。请点击下方“重新尝试连接”或在左侧选择其他交易标的。")
+    st.warning(f"⚠️ 暂未获取到 {symbol} 的实时行情。请确认代码是否正确或点击下方的重新连接。")
     if st.button("🔄 重新尝试连接"):
         st.cache_data.clear()
         st.rerun()
