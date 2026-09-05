@@ -164,7 +164,7 @@ df, real_symbol = fetch_fast_ohlcv(symbol, timeframe)
 
 if not df.empty and len(df) > 25:
     # 技术指标计算
-    df['EMA7'] = ta.ema(df['close'], length=7)
+    df['EMA7'] = df['close'].ewm(span=7, adjust=False).mean()
     df['EMA20'] = ta.ema(df['close'], length=20)
     df['EMA50'] = ta.ema(df['close'], length=50)
     df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
