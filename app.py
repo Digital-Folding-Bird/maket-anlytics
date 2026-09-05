@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import ccxt
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import datetime
 
 # 安全导入 yfinance
 try:
@@ -41,28 +39,24 @@ st.sidebar.title("🛠️ 资产与策略配置")
 asset_category = st.sidebar.selectbox("资产大类", ["加密货币 (Crypto)", "大宗商品与美股 (YFinance)"])
 
 if asset_category == "加密货币 (Crypto)":
-    symbol = st.sidebar.selectbox("交易对", ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"])
-    timeframe = st.sidebar.selectbox("周期", ["1h", "4h", "1d"], index=1)
+    # 映射为 yfinance 的加密货币符号，完全避开币安云端封锁
+    symbol_map = {
+        "BTC/USDT": "BTC-USD",
+        "ETH/USDT": "ETH-USD",
+        "SOL/USDT": "SOL-USD",
+        "BNB/USDT": "BNB-USD"
+    }
+    selected_display = st.sidebar.selectbox("交易对", list(symbol_map.keys()))
+    symbol = symbol_map[selected_display]
+    timeframe = st.sidebar.selectbox("周期", ["1d", "1wk"], index=0)
 else:
-    symbol = st.sidebar.selectbox("标的", ["GC=F", "SI=F", "CL=F", "SPY", "QQQ"]) # 黄金、白银、原油、标普500、纳斯达克
+    selected_display = st.sidebar.selectbox("标的", ["GC=F", "SI=F", "CL=F", "SPY", "QQQ"]) # 黄金、白银、原油、标普500、纳斯达克
+    symbol = selected_display
     timeframe = st.sidebar.selectbox("周期", ["1d", "1wk"], index=0)
 
-# 数据获取函数 (加密货币)
+# 通用稳定数据获取函数 (基于 yfinance，完美适配云端)
 @st.cache_data(ttl=300)
-def fetch_crypto_data(sym, tf, limit=150):
-    try:
-        exchange = ccxt.binance()
-        ohlcv = exchange.fetch_ohlcv(sym, timeframe=tf, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        return df
-    except Exception as e:
-        return pd.DataFrame()
-
-# 数据获取函数 (大宗/美股)
-@st.cache_data(ttl=300)
-def fetch_yf_data(sym, tf):
+def fetch_market_data(sym, tf):
     if not HAS_YFINANCE:
         return pd.DataFrame()
     try:
@@ -77,14 +71,12 @@ def fetch_yf_data(sym, tf):
         return pd.DataFrame()
 
 # 加载数据
-if asset_category == "加密货币 (Crypto)":
-    df = fetch_crypto_data(symbol, timeframe)
-else:
-    df = fetch_yf_data(symbol, timeframe)
+df = fetch_market_data(symbol, timeframe)
 
 # 主界面渲染
-if not df.empty and len(df) > 20:
-    # 纯 Pandas 原生计算技术指标（绝对不报错）
+display_name = selected_display
+if not df.empty and len(df) > 10:
+    # 纯 Pandas 原生计算技术指标
     df['EMA7'] = df['close'].ewm(span=7, adjust=False).mean()
     df['EMA25'] = df['close'].ewm(span=25, adjust=False).mean()
     df['SMA50'] = df['close'].rolling(window=50).mean()
@@ -93,7 +85,7 @@ if not df.empty and len(df) > 20:
     prev_ema7 = float(df['EMA7'].iloc[-2])
     curr_ema7 = float(df['EMA7'].iloc[-1])
     
-    st.title(f"📊 {symbol} 结构化交易仪表盘")
+    st.title(f"📊 {display_name} 结构化交易仪表盘")
     
     # 核心指标展示
     col1, col2, col3 = st.columns(3)
@@ -129,7 +121,7 @@ if not df.empty and len(df) > 20:
     st.plotly_chart(fig, use_container_width=True, key="main_chart")
 
 else:
-    st.warning(f"⚠️ 暂未成功拉取到 {symbol} 的实时行情，可能是网络延迟或接口限制。")
+    st.warning(f"⚠️ 暂未成功拉取到 {display_name} 的实时行情，请点击下方按钮重试。")
     if st.button("🔄 重新尝试连接"):
         st.cache_data.clear()
         st.rerun()
